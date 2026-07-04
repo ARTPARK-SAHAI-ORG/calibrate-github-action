@@ -1,7 +1,8 @@
 # Calibrate GitHub Action
 
-This action runs your [Calibrate](https://calibrate.artpark.ai) agent tests
-automatically in GitHub.
+[Calibrate](https://calibrate.artpark.ai) is a framework for evaluating AI agents which let you move from slow, manual testing to a fast, automated, and repeatable testing process for your entire agent stack.,
+
+This action runs your [Calibrate](https://calibrate.artpark.ai) agent tests automatically in GitHub.
 
 You give it one or more agents. It runs all the tests attached to those agents,
 waits for them to finish, and reports the results. Leave the agent list out and
