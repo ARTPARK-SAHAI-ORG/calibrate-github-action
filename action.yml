@@ -15,7 +15,7 @@ inputs:
   base-url:
     description: "Base URL of the Calibrate backend API. Optional — defaults to the hosted Calibrate backend."
     required: false
-    default: "https://pense-backend.artpark.ai"
+    default: "https://api.calibrate.artpark.ai"
   app-url:
     description: "Base URL of the Calibrate web UI, used to link runs in the PR comment/summary. Optional — defaults to the hosted Calibrate web UI."
     required: false
