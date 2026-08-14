@@ -1,0 +1,32 @@
+# Example: fail a pull request only if the pass rate drops.
+#
+# The action keeps its own record of the numbers from the last run on main, and
+# compares each pull request against it. Failing tests are allowed as long as
+# the pass rate does not go down. An agent that cannot run, errors, or times out
+# still fails the build.
+#
+# Runs on main are what create the record, so keep the `push` trigger below —
+# without it there is never anything to compare against.
+#
+# Copy into your repo at .github/workflows/calibrate.yml and adjust the names.
+name: Calibrate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write # required for the auto PR comment
+
+jobs:
+  agent-tests:
+    runs-on: ubuntu-slim
+    steps:
+      - uses: ARTPARK-SAHAI-ORG/calibrate-github-action@v1
+        with:
+          api-key: ${{ secrets.CALIBRATE_API_KEY }}
+          agents: my-first-agent, my-second-agent # agent names
+          mode: gate-if-worse

@@ -19,9 +19,22 @@ APP_URL="${CALIBRATE_APP_URL:-}"
 MODE="${CALIBRATE_MODE:-gate}"
 POLL_INTERVAL="${CALIBRATE_POLL_INTERVAL:-5}"
 TIMEOUT="${CALIBRATE_TIMEOUT:-1800}"
+# Set by action.yml only in gate-if-worse mode: the file holding what the last
+# run recorded, restored from (and saved back to) the GitHub Actions cache.
+BASELINE_FILE="${CALIBRATE_BASELINE_FILE:-}"
 
 BASE_URL="${BASE_URL%/}"
 APP_URL="${APP_URL%/}"
+
+# Reject an unknown mode instead of quietly behaving like 'report' — a typo in
+# `mode:` would otherwise turn gating off without a word.
+case "$MODE" in
+  gate | report | gate-if-worse) ;;
+  *)
+    echo "::error::unknown mode \"${MODE}\" — use gate, report, or gate-if-worse"
+    exit 2
+    ;;
+esac
 
 for dep in curl jq; do
   command -v "$dep" >/dev/null 2>&1 || { echo "::error::missing required tool: $dep"; exit 2; }
@@ -291,14 +304,84 @@ for ((i = 0; i < N; i++)); do
     ANY_PROBLEM=1
     ROWS+="| \`${label}\` | ${p}/${t} | ⚠️ ${st} ${link} |\n"
   elif [[ "$f" -gt 0 ]]; then
-    ANY_PROBLEM=1
+    # A failing test is NOT an ANY_PROBLEM: that flag means "no usable result"
+    # (couldn't run, didn't finish, timed out), and gate-if-worse gates on it
+    # while forgiving failures the pass rate absorbs. `gate` still fails here,
+    # via SUM_FAILED.
     ROWS+="| \`${label}\` | ${p}/${t} | ❌ ${f} failed ${link} |\n"
   else
     ROWS+="| \`${label}\` | ${p}/${t} | ✅ pass ${link} |\n"
   fi
 done
 
-if [[ "$SUM_FAILED" -gt 0 || "$ANY_PROBLEM" -eq 1 ]]; then
+# Pass-rate comparison (gate-if-worse mode only).
+#
+# The record is a JSON object kept in the GitHub Actions cache, keyed by agent
+# UUID -> {total, passed}. This action always runs *every* test linked
+# to an agent, so whatever it recorded was a full run — no guessing which past
+# run was complete. Only agents on BOTH sides (a stored record and a finished
+# run now) are compared, so adding an agent can't move the number.
+REGRESSED=0
+CMP_TOTAL=0; CMP_PASSED=0; BASE_TOTAL=0; BASE_PASSED=0
+NEW_PCT=""; OLD_PCT=""; RATE_LINE=""
+if [[ "$MODE" == "gate-if-worse" ]]; then
+  PREV_JSON="{}"
+  if [[ -n "$BASELINE_FILE" && -s "$BASELINE_FILE" ]]; then
+    PREV_JSON="$(jq -c '.' "$BASELINE_FILE" 2>/dev/null)" || PREV_JSON="{}"
+    [[ -n "$PREV_JSON" ]] || PREV_JSON="{}"
+  fi
+
+  NEW_JSON="{}"
+  for ((i = 0; i < N; i++)); do
+    [[ "${STATUS[i]}" == "done" && "${TOTAL[i]}" -gt 0 ]] || continue
+    NEW_JSON="$(printf '%s' "$NEW_JSON" | jq -c --arg a "${AGENTS[i]}" \
+      --argjson t "${TOTAL[i]}" --argjson p "${PASSED[i]}" \
+      '.[$a] = {total: $t, passed: $p}')"
+
+    read -r _bt _bp < <(printf '%s' "$PREV_JSON" |
+      jq -r --arg a "${AGENTS[i]}" '.[$a] // {} | "\(.total // 0) \(.passed // 0)"')
+    [[ "${_bt:-0}" -gt 0 ]] || continue
+    BASE_TOTAL=$((BASE_TOTAL + _bt)); BASE_PASSED=$((BASE_PASSED + _bp))
+    CMP_TOTAL=$((CMP_TOTAL + TOTAL[i])); CMP_PASSED=$((CMP_PASSED + PASSED[i]))
+  done
+
+  # Merge over the previous record rather than replacing it, so a second
+  # workflow testing different agents doesn't wipe this one's entries. Only a
+  # run on the default branch actually saves the file back to the cache — that
+  # condition lives in action.yml.
+  if [[ -n "$BASELINE_FILE" ]]; then
+    printf '%s' "$PREV_JSON" | jq -c --argjson new "$NEW_JSON" '. + $new' >"$BASELINE_FILE" ||
+      printf '%s' "$NEW_JSON" >"$BASELINE_FILE"
+  fi
+
+  if [[ "$BASE_TOTAL" -gt 0 && "$CMP_TOTAL" -gt 0 ]]; then
+    pct() { jq -rn --argjson p "$1" --argjson t "$2" '(100 * $p / $t * 10 | round) / 10 | tostring'; }
+    NEW_PCT="$(pct "$CMP_PASSED" "$CMP_TOTAL")"
+    OLD_PCT="$(pct "$BASE_PASSED" "$BASE_TOTAL")"
+    # Cross-multiply instead of dividing: exact whole-number maths, so rounding
+    # never decides a build.
+    if [[ $((CMP_PASSED * BASE_TOTAL)) -lt $((BASE_PASSED * CMP_TOTAL)) ]]; then
+      REGRESSED=1
+      echo "::error::pass rate dropped to ${NEW_PCT}% (${CMP_PASSED}/${CMP_TOTAL}) from ${OLD_PCT}% (${BASE_PASSED}/${BASE_TOTAL})"
+    fi
+    RATE_LINE="Pass rate: ${NEW_PCT}% (${CMP_PASSED}/${CMP_TOTAL}) — was ${OLD_PCT}% (${BASE_PASSED}/${BASE_TOTAL})"
+  else
+    RATE_LINE="Pass rate: no previous run on record, nothing to compare with."
+  fi
+fi
+
+if [[ "$MODE" == "gate-if-worse" ]]; then
+  if [[ "$ANY_PROBLEM" -eq 1 ]]; then
+    HEADER="❌ **Calibrate: some agents did not finish** (${N} agent(s))"
+    CONCLUSION="failure"
+  elif [[ "$REGRESSED" -eq 1 ]]; then
+    HEADER="❌ **Calibrate: pass rate dropped** across ${N} agent(s)"
+    CONCLUSION="failure"
+  else
+    HEADER="✅ **Calibrate: pass rate held** across ${N} agent(s)"
+    CONCLUSION="success"
+  fi
+elif [[ "$SUM_FAILED" -gt 0 || "$ANY_PROBLEM" -eq 1 ]]; then
   HEADER="❌ **Calibrate: ${SUM_FAILED} test(s) failed** across ${N} agent(s)"
   CONCLUSION="failure"
 else
@@ -306,13 +389,16 @@ else
   CONCLUSION="success"
 fi
 
-REPORT="$(printf '%b\n\n| Agent | Passed | Result |\n|---|---|---|\n%b' "$HEADER" "$ROWS")"
+REPORT="$(printf '%b\n\n%b| Agent | Passed | Result |\n|---|---|---|\n%b' \
+  "$HEADER" "${RATE_LINE:+${RATE_LINE}\n\n}" "$ROWS")"
 
 # Outputs.
 {
   echo "total=${SUM_TOTAL}"
   echo "passed=${SUM_PASSED}"
   echo "failed=${SUM_FAILED}"
+  echo "pass-rate=${NEW_PCT}"
+  echo "previous-pass-rate=${OLD_PCT}"
 } >>"${GITHUB_OUTPUT:-/dev/null}"
 
 # Job summary + console.
@@ -337,7 +423,7 @@ if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -n "${GITHUB_TOKEN:-}" ]]; t
   fi
 fi
 
-if [[ "$MODE" == "gate" && "$CONCLUSION" == "failure" ]]; then
+if [[ "$MODE" != "report" && "$CONCLUSION" == "failure" ]]; then
   exit 1
 fi
 exit 0

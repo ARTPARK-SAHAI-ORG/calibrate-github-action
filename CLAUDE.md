@@ -24,9 +24,10 @@ git tag (e.g. `v1`); consumers reference it as `ARTPARK-SAHAI-ORG/calibrate-gith
   code.
 - **`README.md`** — user-facing docs. Written for a **new user** in plain
   language; keep it minimal.
-- **`examples/specific-agents.yml`** / **`examples/all-agents.yml`** — consumer
-  workflows to copy into their repo: one naming specific agents, one omitting
-  `agents` to run every agent in the account linked to the API key.
+- **`examples/specific-agents.yml`** / **`examples/all-agents.yml`** /
+  **`examples/gate-if-worse.yml`** — consumer workflows to copy into their repo:
+  one naming specific agents, one omitting `agents` to run every agent in the
+  account linked to the API key, one gating on the pass rate.
 
 ## How a value flows through
 
@@ -74,7 +75,7 @@ run shouldn't turn the build red.)
 | `agents`        | no       | _all agents_                       | Agent **names** (not UUIDs), comma- or newline-separated. Omit to run every agent in the account linked to the API key (via `GET /agents`). |
 | `base-url`      | no       | `https://pense-backend.artpark.ai` | Backend API; override only for self-hosted.                               |
 | `app-url`       | no       | `https://calibrate.artpark.ai`     | Web UI base for `view` links in the report.                               |
-| `mode`          | no       | `gate`                             | `gate` fails on any problem; `report` always exits 0.                     |
+| `mode`          | no       | `gate`                             | `gate` fails on any problem; `report` always exits 0; `gate-if-worse` fails only on a pass-rate drop (or an agent that didn't finish). Anything else is a fatal usage error. |
 | `poll-interval` | no       | `5`                                | Seconds between status polls.                                             |
 | `timeout`       | no       | `1800`                             | Max seconds to wait for runs.                                             |
 | `github-token`  | no       | `${{ github.token }}`              | For the PR comment; needs `pull-requests: write`. Not surfaced in README. |
@@ -105,6 +106,21 @@ run shouldn't turn the build red.)
   no associative arrays (`declare -A`), no other bash-4+ features.
 - **`api()` sets globals** `API_HTTP_STATUS` / `API_BODY`. Call it as a statement,
   never in `$(...)` — a subshell would discard the globals.
+- **`gate-if-worse` compares against a file, not the API.** `action.yml` restores
+  `$RUNNER_TEMP/calibrate-baseline.json` from the GitHub Actions cache and passes
+  its path as `CALIBRATE_BASELINE_FILE`; `run.sh` reads it, and writes the new
+  numbers back to the same path merged over the old ones (so a second workflow
+  covering other agents doesn't wipe these entries). Shape: `{agent_uuid:
+  {total, passed}}`. Only a run on the default branch saves it back
+  (`if:` on the save step), and only when `run.sh` succeeded — a bad run must not
+  become the new normal. There's no API for "the last full run": the backend
+  doesn't record whether a run covered every linked test (`POST
+  /agent-tests/agent/{uuid}/run` accepts a `test_uuids` subset), so don't try to
+  infer a baseline from `GET /agent-tests/agent/{uuid}/runs`. This action always
+  runs the full set, so its own record is trustworthy by construction.
+- **Only agents on both sides are compared**, and the comparison is
+  cross-multiplied (`passed_now * total_before` vs `passed_before * total_now`) —
+  integer maths, no rounding decides a build. No baseline → no comparison → pass.
 - **GitHub log conventions:** `::error::`, `::warning::`, `::group::`/`::endgroup::`.
 - **Exit codes:** `0` ok (or `report` mode); `1` = `gate` failure (tests failed /
   problems); `2` = config/auth/usage error (missing dep, bad key, unresolved name).
@@ -112,15 +128,21 @@ run shouldn't turn the build red.)
 
 ## Verifying changes
 
-There's no test suite. After editing `run.sh`:
+After editing `run.sh`:
 
 ```bash
 bash -n run.sh   # syntax check — always run this
+bash test.sh     # end-to-end checks against a stand-in for curl
 ```
 
-The script only does real work against a live Calibrate backend + GitHub Actions
-env, so full runtime testing happens in an actual workflow. Keep changes small and
-syntax-checked.
+`test.sh` puts a fake `curl` on `PATH` and drives `run.sh` end to end with canned
+API responses — no backend, no network. It covers the `gate-if-worse` comparison
+(the only non-trivial logic here), the record it writes, and the exit codes of
+all three modes. Keep it passing; extend it when you touch that logic.
+
+Everything else — resolving names, polling, the PR comment — still only does real
+work against a live Calibrate backend + GitHub Actions env, so it's exercised in
+an actual workflow. Keep changes small and syntax-checked.
 
 ## Docs style
 

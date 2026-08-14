@@ -21,7 +21,7 @@ inputs:
     required: false
     default: "https://calibrate.artpark.ai"
   mode:
-    description: "'gate' fails the job if any test fails; 'report' always succeeds and only prints the numbers."
+    description: "'gate' fails the job if any test fails; 'report' always succeeds and only prints the numbers; 'gate-if-worse' fails only if the pass rate is lower than the last recorded run (or an agent didn't finish)."
     required: false
     default: "gate"
   poll-interval:
@@ -47,10 +47,27 @@ outputs:
   failed:
     description: "Total failed test cases."
     value: ${{ steps.calibrate.outputs.failed }}
+  pass-rate:
+    description: "Pass rate of this run as a percentage, over the agents that had a previous run to compare with. Empty unless mode is 'gate-if-worse' and a comparison was possible."
+    value: ${{ steps.calibrate.outputs.pass-rate }}
+  previous-pass-rate:
+    description: "Pass rate of the last recorded run, as a percentage. Empty unless mode is 'gate-if-worse' and a comparison was possible."
+    value: ${{ steps.calibrate.outputs.previous-pass-rate }}
 
 runs:
   using: "composite"
   steps:
+    # gate-if-worse only: read back what the last run recorded. The key never
+    # matches exactly on purpose — restore-keys does a prefix match and returns
+    # the most recently saved entry, since a cache key can't be overwritten.
+    - name: Restore the last recorded run
+      if: inputs.mode == 'gate-if-worse'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/calibrate-baseline.json
+        key: calibrate-baseline-
+        restore-keys: calibrate-baseline-
+
     - id: calibrate
       shell: bash
       env:
@@ -61,5 +78,17 @@ runs:
         CALIBRATE_MODE: ${{ inputs.mode }}
         CALIBRATE_POLL_INTERVAL: ${{ inputs.poll-interval }}
         CALIBRATE_TIMEOUT: ${{ inputs.timeout }}
+        CALIBRATE_BASELINE_FILE: ${{ inputs.mode == 'gate-if-worse' && format('{0}/calibrate-baseline.json', runner.temp) || '' }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
       run: ${{ github.action_path }}/run.sh
+
+    # Record this run's numbers, but only from the default branch, so a pull
+    # request can't lower its own bar. No `always()`: if the step above failed,
+    # this is skipped, so a bad run on the default branch doesn't become the new
+    # normal.
+    - name: Record this run
+      if: inputs.mode == 'gate-if-worse' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/calibrate-baseline.json
+        key: calibrate-baseline-${{ github.run_id }}
