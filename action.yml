@@ -21,7 +21,7 @@ inputs:
     required: false
     default: "https://calibrate.artpark.ai"
   mode:
-    description: "'gate' fails the job if any test fails; 'report' always succeeds and only prints the numbers."
+    description: "'gate' fails the job if any test fails; 'report' always succeeds and only prints the numbers; 'gate-if-worse' fails only if the pass rate is lower than the last recorded run (or an agent didn't finish)."
     required: false
     default: "gate"
   poll-interval:
@@ -47,6 +47,12 @@ outputs:
   failed:
     description: "Total failed test cases."
     value: ${{ steps.calibrate.outputs.failed }}
+  pass-rate:
+    description: "Pass rate of this run as a percentage, over the agents that had an earlier run to compare with. Empty unless mode is 'gate-if-worse' and a comparison was possible."
+    value: ${{ steps.calibrate.outputs.pass-rate }}
+  previous-pass-rate:
+    description: "Pass rate of the earlier run compared against, as a percentage. Empty unless mode is 'gate-if-worse' and a comparison was possible."
+    value: ${{ steps.calibrate.outputs.previous-pass-rate }}
 
 runs:
   using: "composite"

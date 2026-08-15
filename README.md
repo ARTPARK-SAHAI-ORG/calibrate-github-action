@@ -12,6 +12,34 @@ You can choose what happens when a test fails:
 
 - **gate** (default) — the check fails, so a broken agent can block a merge.
 - **report** — the check always passes; it just shows the numbers.
+- **gate-if-worse** — the check fails only if fewer tests pass than last time.
+
+## Failing only when things get worse
+
+Some agents never pass every test, so `gate` would block every merge. Use
+`mode: gate-if-worse` instead. It compares this run against the agent's
+previous run in Calibrate.
+
+- Pass rate the same or higher: the check passes, even with failing tests.
+- Pass rate lower: the check fails.
+- An agent that cannot run, errors, or times out: the check fails.
+
+The pass rate is one number across all your agents: tests passed divided by
+tests run.
+
+Nothing is stored anywhere. Calibrate already keeps every run, so the action
+just reads the previous one.
+
+Which previous run: the most recent one that covered the most tests. A run
+someone did by hand over three tests is ignored, so it cannot become the number
+to beat. An agent with no earlier run is left out, and if that is all of them,
+the check passes and says there was nothing to compare with.
+
+One thing to know: if you added tests since the previous run, you are comparing
+a rate over 40 tests with a rate over 45. That is what gating on a rate means.
+
+See [`examples/gate-if-worse.yml`](examples/gate-if-worse.yml) for the full
+workflow.
 
 If the run is on a pull request, it also adds a comment to the PR with the
 results. Re-running updates that same comment instead of adding a new one.
@@ -72,10 +100,14 @@ Or omit `agents` to run every agent in the account linked to the API key:
 | `agents`        | no       | _all agents_                       | Agent names, separated by commas or newlines. Runs **all** tests linked to each. Omit to run every agent in the account linked to the API key. |
 | `base-url`      | no       | `https://pense-backend.artpark.ai` | Backend API. Override only for self-hosted.                                                                                                    |
 | `app-url`       | no       | `https://calibrate.artpark.ai`     | Web UI base for `view` links in the report.                                                                                                    |
-| `mode`          | no       | `gate`                             | `gate` fails the job on any failure; `report` always succeeds.                                                                                 |
+| `mode`          | no       | `gate`                             | `gate` fails the job on any failure; `report` always succeeds; `gate-if-worse` fails only if the pass rate drops.                               |
 | `poll-interval` | no       | `5`                                | Seconds between status polls.                                                                                                                  |
 | `timeout`       | no       | `1800`                             | Max seconds to wait for runs to finish.                                                                                                        |
 
 ## Outputs
 
 `total`, `passed`, `failed` — test-case counts across all agents.
+
+`pass-rate`, `previous-pass-rate` — the two percentages compared in
+`gate-if-worse` mode. Both are empty in the other modes, and when there was no
+earlier run to compare against.
