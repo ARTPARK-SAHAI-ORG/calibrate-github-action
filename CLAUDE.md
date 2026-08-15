@@ -54,6 +54,12 @@ defaults in **one** place — `action.yml` is the source of truth for default UR
   returns `{"task_id": ...}`.
 - `GET /agent-tests/run/{task_id}` — run status; terminal states are `done`,
   `failed`, `cancelled`; carries `total_tests`, `passed`, `failed`.
+- `GET /agent-tests/agent/{uuid}/runs?type=llm-unit-test&status=done&limit=50` —
+  that agent's past runs, **newest first**, in a `{"items": [...], "total": n}`
+  envelope. Each item carries `uuid`, `total_tests`, `passed`, `error`. Used by
+  `gate-if-worse` for the score to beat. It does **not** say whether a run
+  covered every linked test — `POST /agent-tests/agent/{uuid}/run` accepts a
+  `test_uuids` subset — hence the "most tests wins" rule below.
 
 Status-code conventions the script relies on: **401/403** = bad/missing key
 (global → fatal); **404** = missing/out-of-org agent; **400** = unrunnable agent
@@ -106,21 +112,19 @@ run shouldn't turn the build red.)
   no associative arrays (`declare -A`), no other bash-4+ features.
 - **`api()` sets globals** `API_HTTP_STATUS` / `API_BODY`. Call it as a statement,
   never in `$(...)` — a subshell would discard the globals.
-- **`gate-if-worse` compares against a file, not the API.** `action.yml` restores
-  `$RUNNER_TEMP/calibrate-baseline.json` from the GitHub Actions cache and passes
-  its path as `CALIBRATE_BASELINE_FILE`; `run.sh` reads it, and writes the new
-  numbers back to the same path merged over the old ones (so a second workflow
-  covering other agents doesn't wipe these entries). Shape: `{agent_uuid:
-  {total, passed}}`. Only a run on the default branch saves it back
-  (`if:` on the save step), and only when `run.sh` succeeded — a bad run must not
-  become the new normal. There's no API for "the last full run": the backend
-  doesn't record whether a run covered every linked test (`POST
-  /agent-tests/agent/{uuid}/run` accepts a `test_uuids` subset), so don't try to
-  infer a baseline from `GET /agent-tests/agent/{uuid}/runs`. This action always
-  runs the full set, so its own record is trustworthy by construction.
-- **Only agents on both sides are compared**, and the comparison is
-  cross-multiplied (`passed_now * total_before` vs `passed_before * total_now`) —
-  integer maths, no rounding decides a build. No baseline → no comparison → pass.
+- **`gate-if-worse` stores nothing.** The previous score comes from `GET
+  /agent-tests/agent/{uuid}/runs?type=llm-unit-test&status=done` (newest first),
+  read after polling so this run's own task id can be excluded. Don't reintroduce
+  a cache/file/artifact: Calibrate already keeps every run.
+- **Which past run wins:** drop this run, errored runs, and any run with MORE
+  tests than this one (it covered tests since deleted); of what's left take the
+  highest `total_tests`, and the newest among ties (the list is newest-first, so
+  `first`). That skips a hand-run subset without going silent when tests are
+  added. All of it is one jq expression — keep it there, not in bash.
+- **Only agents with a past run are compared**, on both sides of the sum, and the
+  comparison is cross-multiplied (`passed_now * total_before` vs `passed_before *
+  total_now`) — integer maths, no rounding decides a build. No past run → no
+  comparison → pass.
 - **GitHub log conventions:** `::error::`, `::warning::`, `::group::`/`::endgroup::`.
 - **Exit codes:** `0` ok (or `report` mode); `1` = `gate` failure (tests failed /
   problems); `2` = config/auth/usage error (missing dep, bad key, unresolved name).

@@ -17,8 +17,8 @@ You can choose what happens when a test fails:
 ## Failing only when things get worse
 
 Some agents never pass every test, so `gate` would block every merge. Use
-`mode: gate-if-worse` instead: the action remembers the numbers from the last
-run on your main branch and compares each pull request against them.
+`mode: gate-if-worse` instead. It compares this run against the agent's
+previous run in Calibrate.
 
 - Pass rate the same or higher: the check passes, even with failing tests.
 - Pass rate lower: the check fails.
@@ -27,17 +27,16 @@ run on your main branch and compares each pull request against them.
 The pass rate is one number across all your agents: tests passed divided by
 tests run.
 
-Only runs on your main branch save the numbers, so a pull request cannot lower
-its own bar by pushing again. Add a `push` trigger for your main branch,
-otherwise there is never anything to compare against.
+Nothing is stored anywhere. Calibrate already keeps every run, so the action
+just reads the previous one.
 
-Until the action has run once on your main branch there is nothing on record,
-so the check passes and says so. The same happens if nobody runs it for a week,
-because GitHub deletes a stored file that has not been read for 7 days.
+Which previous run: the most recent one that covered the most tests. A run
+someone did by hand over three tests is ignored, so it cannot become the number
+to beat. An agent with no earlier run is left out, and if that is all of them,
+the check passes and says there was nothing to compare with.
 
-One thing to know: if you added tests since the last run on main, you are
-comparing a rate over 40 tests with a rate over 45. That is what gating on a
-rate means.
+One thing to know: if you added tests since the previous run, you are comparing
+a rate over 40 tests with a rate over 45. That is what gating on a rate means.
 
 See [`examples/gate-if-worse.yml`](examples/gate-if-worse.yml) for the full
 workflow.
@@ -110,5 +109,5 @@ Or omit `agents` to run every agent in the account linked to the API key:
 `total`, `passed`, `failed` — test-case counts across all agents.
 
 `pass-rate`, `previous-pass-rate` — the two percentages compared in
-`gate-if-worse` mode. Both are empty in the other modes, and when there was
-nothing on record to compare against.
+`gate-if-worse` mode. Both are empty in the other modes, and when there was no
+earlier run to compare against.

@@ -1,12 +1,8 @@
 # Example: fail a pull request only if the pass rate drops.
 #
-# The action keeps its own record of the numbers from the last run on main, and
-# compares each pull request against it. Failing tests are allowed as long as
-# the pass rate does not go down. An agent that cannot run, errors, or times out
-# still fails the build.
-#
-# Runs on main are what create the record, so keep the `push` trigger below —
-# without it there is never anything to compare against.
+# Each agent is compared against its previous run in Calibrate. Failing tests
+# are allowed as long as the pass rate does not go down. An agent that cannot
+# run, errors, or times out still fails the build.
 #
 # Copy into your repo at .github/workflows/calibrate.yml and adjust the names.
 name: Calibrate

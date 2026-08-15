@@ -19,9 +19,6 @@ APP_URL="${CALIBRATE_APP_URL:-}"
 MODE="${CALIBRATE_MODE:-gate}"
 POLL_INTERVAL="${CALIBRATE_POLL_INTERVAL:-5}"
 TIMEOUT="${CALIBRATE_TIMEOUT:-1800}"
-# Set by action.yml only in gate-if-worse mode: the file holding what the last
-# run recorded, restored from (and saved back to) the GitHub Actions cache.
-BASELINE_FILE="${CALIBRATE_BASELINE_FILE:-}"
 
 BASE_URL="${BASE_URL%/}"
 APP_URL="${APP_URL%/}"
@@ -316,43 +313,48 @@ done
 
 # Pass-rate comparison (gate-if-worse mode only).
 #
-# The record is a JSON object kept in the GitHub Actions cache, keyed by agent
-# UUID -> {total, passed}. This action always runs *every* test linked
-# to an agent, so whatever it recorded was a full run — no guessing which past
-# run was complete. Only agents on BOTH sides (a stored record and a finished
-# run now) are compared, so adding an agent can't move the number.
+# The previous score comes straight from Calibrate — it already stores every
+# run — so nothing is kept between builds.
+#
+#   Run list:  GET /agent-tests/agent/{uuid}/runs?type=llm-unit-test&status=done
+#     200 -> {"items": [{"uuid", "total_tests", "passed", "error", ...}], ...}
+#
+# Newest first. Of the agent's past finished runs we take the ones that covered
+# the most tests, and of those the newest. That skips a run someone did by hand
+# over a handful of tests, which would make the comparison meaningless. Runs
+# that covered MORE tests than today's are dropped first: they included tests
+# that have since been deleted, so they're stale.
 REGRESSED=0
 CMP_TOTAL=0; CMP_PASSED=0; BASE_TOTAL=0; BASE_PASSED=0
 NEW_PCT=""; OLD_PCT=""; RATE_LINE=""
 if [[ "$MODE" == "gate-if-worse" ]]; then
-  PREV_JSON="{}"
-  if [[ -n "$BASELINE_FILE" && -s "$BASELINE_FILE" ]]; then
-    PREV_JSON="$(jq -c '.' "$BASELINE_FILE" 2>/dev/null)" || PREV_JSON="{}"
-    [[ -n "$PREV_JSON" ]] || PREV_JSON="{}"
-  fi
-
-  NEW_JSON="{}"
+  echo "::group::Previous scores"
   for ((i = 0; i < N; i++)); do
     [[ "${STATUS[i]}" == "done" && "${TOTAL[i]}" -gt 0 ]] || continue
-    NEW_JSON="$(printf '%s' "$NEW_JSON" | jq -c --arg a "${AGENTS[i]}" \
-      --argjson t "${TOTAL[i]}" --argjson p "${PASSED[i]}" \
-      '.[$a] = {total: $t, passed: $p}')"
 
-    read -r _bt _bp < <(printf '%s' "$PREV_JSON" |
-      jq -r --arg a "${AGENTS[i]}" '.[$a] // {} | "\(.total // 0) \(.passed // 0)"')
-    [[ "${_bt:-0}" -gt 0 ]] || continue
+    api GET "/agent-tests/agent/${AGENTS[i]}/runs?type=llm-unit-test&status=done&limit=50"
+    if [[ "$API_HTTP_STATUS" != "200" ]]; then
+      echo "::warning::agent ${LABELS[i]}: could not read past runs (HTTP ${API_HTTP_STATUS}); left out of the comparison"
+      continue
+    fi
+
+    read -r _bt _bp < <(echo "$API_BODY" | jq -r --arg tid "${TASK[i]}" --argjson cap "${TOTAL[i]}" '
+      [ .items[]
+        | select(.uuid != $tid and .error != true and (.total_tests // 0) > 0 and .total_tests <= $cap)
+      ] as $past
+      | ($past | map(.total_tests) | max) as $most
+      | ($past | map(select(.total_tests == $most)) | first // {})
+      | "\(.total_tests // 0) \(.passed // 0)"')
+
+    if [[ "${_bt:-0}" -le 0 ]]; then
+      echo "agent ${LABELS[i]}: no earlier run to compare with"
+      continue
+    fi
+    echo "agent ${LABELS[i]}: now ${PASSED[i]}/${TOTAL[i]}, before ${_bp}/${_bt}"
     BASE_TOTAL=$((BASE_TOTAL + _bt)); BASE_PASSED=$((BASE_PASSED + _bp))
     CMP_TOTAL=$((CMP_TOTAL + TOTAL[i])); CMP_PASSED=$((CMP_PASSED + PASSED[i]))
   done
-
-  # Merge over the previous record rather than replacing it, so a second
-  # workflow testing different agents doesn't wipe this one's entries. Only a
-  # run on the default branch actually saves the file back to the cache — that
-  # condition lives in action.yml.
-  if [[ -n "$BASELINE_FILE" ]]; then
-    printf '%s' "$PREV_JSON" | jq -c --argjson new "$NEW_JSON" '. + $new' >"$BASELINE_FILE" ||
-      printf '%s' "$NEW_JSON" >"$BASELINE_FILE"
-  fi
+  echo "::endgroup::"
 
   if [[ "$BASE_TOTAL" -gt 0 && "$CMP_TOTAL" -gt 0 ]]; then
     pct() { jq -rn --argjson p "$1" --argjson t "$2" '(100 * $p / $t * 10 | round) / 10 | tostring'; }
@@ -366,7 +368,7 @@ if [[ "$MODE" == "gate-if-worse" ]]; then
     fi
     RATE_LINE="Pass rate: ${NEW_PCT}% (${CMP_PASSED}/${CMP_TOTAL}) — was ${OLD_PCT}% (${BASE_PASSED}/${BASE_TOTAL})"
   else
-    RATE_LINE="Pass rate: no previous run on record, nothing to compare with."
+    RATE_LINE="Pass rate: no earlier run to compare with."
   fi
 fi
 
